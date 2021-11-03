@@ -30,9 +30,87 @@ classdef TFM_ANALYSIS < handle
             h.parameters=params;
         end
 
-        function Quiver = PIV_3D(h,im1,im2)
+        function Register = Global_drift_compensation(h,im1, im2)
+            
+            if h.parameters.use_GPU
+                im1 = gpuArray(single(im1));
+                im2 = gpuArray(single(im2));
+            end
+            h.parameters.sizes = size(im1, 1:3);
+            if any(size(im1) ~= size(im2))
+                error('Image dimensions do not match together.')
+            end
+        % 2. Padarray; xExpandMatrix is equivalent to padarray.
+            if size(im1,3) > 1
+                im2 = padarray(im2, h.parameters.padding*ones(1,3), 0);
+            else
+                im2 = padarray(im2, h.parameters.padding*ones(1,2), 0);
+            end
+        % 3. Initialize Register
+            Register = struct;
+            Register.corr = [];
+            [h.utility.YY,h.utility.XX, h.utility.ZZ] = ndgrid(1:size(im2,1), 1:size(im2,2),1:size(im2,3));
+            if h.parameters.use_GPU
+                h.utility.XX = gpuArray(h.utility.XX);
+                h.utility.YY = gpuArray(h.utility.YY);
+                h.utility.ZZ = gpuArray(h.utility.ZZ);
+            end
+        
+        % 4. Major loop
+        U = 0; V = 0; W = 0;
+            niterations=0; DX=inf; DY=inf; DZ=inf; % initialize iterative process
+            while niterations<=h.parameters.N && abs(U-DX) > 0.02 &&...
+                    abs(V-DY) > 0.02 && abs(W-DZ) > 0.02
+            
+            % 4-1. allocate the displacement on the new matrix
+                niterations = niterations + 1;
+                DX = U;
+                DY = V;
+                DZ = W;
 
+            % 4-2. Initialize block
+                if ~(DX == 0 && DY == 0) %skip first iteration(DX=0,Dy=0 for first iteration)
+                    im3 = h.circshift_subpixel_MS(im2,[DY DX DZ]);
+                else
+                    im3 = im2;
+                end
+
+                if size(im2,3) > 1
+                    im3 = im3(h.parameters.padding+1:end-h.parameters.padding,...
+                        h.parameters.padding+1:end-h.parameters.padding,...
+                        h.parameters.padding+1:end-h.parameters.padding);
+                else
+                    im3 = im3(h.parameters.padding+1:end-h.parameters.padding,...
+                        h.parameters.padding+1:end-h.parameters.padding,:);
+                end
+
+        % 4-3. Get correlation & quiver vectors
+                [~, dshift, Register.corr(niterations)] = h.Get_correlation_3D(im1, im3,h.parameters.N);
+                V = V + dshift(2);
+                U = U + dshift(1);
+                W = W + dshift(3);
+            end
+
+            Register.Img_regsitered = gather(im3);
+            Register.shift_vector = gather([V U W]);
+        end
+
+        function Quiver = PIV_3D(h,im1,im2,Crop_mask)
         % 1. GPU Initialization
+            if nargin == 4
+                im1 = im1 .* Crop_mask;
+                im2 = im2 .* Crop_mask;
+                [xind,yind,zind]=ind2sub(size(Crop_mask),find(Crop_mask>0.1));
+                i1=min(xind);j1=min(yind);k1=min(zind);
+                i2=max(xind);j2=max(yind);k2=max(zind);
+                im1 = im1(i1:i2, j1:j2, k1:k2);
+                im2 = im2(i1:i2, j1:j2, k1:k2);
+                size(im1)
+                if size(im1,3) < h.parameters.blocksizes(3)
+                    h.parameters.blocksizes(3) = size(im1,3);
+                end
+            end
+
             if h.parameters.use_GPU
                 im1 = gpuArray(single(im1));
                 im2 = gpuArray(single(im2));
@@ -43,6 +121,8 @@ classdef TFM_ANALYSIS < handle
             end
             
         % 2. Padarray; xExpandMatrix is equivalent to padarray.
+
+
             if size(im1,3) > 1
                 im1 = padarray(im1, h.parameters.padding*ones(1,3), 0);
                 im2 = padarray(im2, h.parameters.padding*ones(1,3), 0);
@@ -89,14 +169,14 @@ classdef TFM_ANALYSIS < handle
                 im11 = im1(ki*(incs(1)-1)+1:ki*(incs(1)-1)+h.parameters.blocksizes(1)+2*h.parameters.padding,...
                     kj*(incs(2)-1)+1:kj*(incs(2)-1)+h.parameters.blocksizes(2)+2*h.parameters.padding,...
                     kk*(incs(3)-1)+1:kk*(incs(3)-1)+h.parameters.blocksizes(3)+2*h.parameters.padding);
-                im11 = im11(h.parameters.padding+1:end-h.parameters.padding,...
-                    h.parameters.padding+1:end-h.parameters.padding,...
-                    h.parameters.padding+1:end-h.parameters.padding);
+%                 im11 = im11(h.parameters.padding+1:end-h.parameters.padding,...
+%                     h.parameters.padding+1:end-h.parameters.padding,...
+%                     h.parameters.padding+1:end-h.parameters.padding);
             else
                 im11 = im1(ki*(incs(1)-1)+1:ki*(incs(1)-1)+h.parameters.blocksizes(1)+2*h.parameters.padding,...
                     kj*(incs(2)-1)+1:kj*(incs(2)-1)+h.parameters.blocksizes(2)+2*h.parameters.padding,:);
-                im11 = im11(h.parameters.padding+1:end-h.parameters.padding,...
-                    h.parameters.padding+1:end-h.parameters.padding,:);
+%                 im11 = im11(h.parameters.padding+1:end-h.parameters.padding,...
+%                     h.parameters.padding+1:end-h.parameters.padding,:);
             end
             [h.utility.YY,h.utility.XX, h.utility.ZZ] = ndgrid(1:size(im11,1), 1:size(im11,2),1:size(im11,3));
             if h.parameters.use_GPU
@@ -104,7 +184,6 @@ classdef TFM_ANALYSIS < handle
                 h.utility.YY = gpuArray(h.utility.YY);
                 h.utility.ZZ = gpuArray(h.utility.ZZ);
             end
-
             %{
             Size1 = size([1:inci:sz(1)-iblocksize+1],2); % DT
             Size2 = size([1:incj:sz(2)-jblocksize+1],2); % DT
@@ -145,7 +224,7 @@ classdef TFM_ANALYSIS < handle
             
                         % 5-2. Initialize block
                             if ~(DX == 0 && DY == 0) %skip first iteration(DX=0,Dy=0 for first iteration)
-                                im23 = circshift_subpixel_MS(im22,[DY DX DZ],h.parameters.use_GPU);
+                                im23 = h.circshift_subpixel_MS(im22,[DY DX DZ]);
                             else
                                 if Qsz(3) > 1
                                     im11 = im1(ki*(incs(1)-1)+1:ki*(incs(1)-1)+h.parameters.blocksizes(1)+2*h.parameters.padding,...
@@ -157,8 +236,6 @@ classdef TFM_ANALYSIS < handle
                                     im11 = im11(h.parameters.padding+1:end-h.parameters.padding,...
                                         h.parameters.padding+1:end-h.parameters.padding,...
                                         h.parameters.padding+1:end-h.parameters.padding);
-
-
                                 else
                                     im11 = im1(ki*(incs(1)-1)+1:ki*(incs(1)-1)+h.parameters.blocksizes(1)+2*h.parameters.padding,...
                                         kj*(incs(2)-1)+1:kj*(incs(2)-1)+h.parameters.blocksizes(2)+2*h.parameters.padding,:);
@@ -212,33 +289,45 @@ classdef TFM_ANALYSIS < handle
                         dz((ki+inci-1)/inci, (kj+incj-1)/incj,  (kk+inck-1)/inck) = DZ + x_cntr(c,N,method,'Z',th); 
                         pkh((ki+inci-1)/inci, (kj+incj-1)/incj, (kk+inck-1)/inck) = max3(c); % store peak height
                         %}
-            
                         end
                     end
                 end
             end
-            Quiver.U = gather(Quiver.U);
-            Quiver.V = gather(Quiver.V);
-            Quiver.W = gather(Quiver.W);
+            Quiver.U = gather(Quiver.U.*h.parameters.resolution(2));
+            Quiver.V = gather(Quiver.V.*h.parameters.resolution(1));
+            if length(h.parameters.resolution) == 3
+                Quiver.W = gather(Quiver.W.*h.parameters.resolution(3));
+            else
+                Quiver.W = gather(Quiver.W);
+            end
 
             if length(Qsz) > 2
-            [Quiver.Y Quiver.X Quiver.Z] = ndgrid((1:Qsz(1))*(h.parameters.blocksizes(1)-1)+h.parameters.blocksizes(1)/2,...
-                (1:Qsz(2))*(h.parameters.blocksizes(2)-1)+h.parameters.blocksizes(2)/2,...
-                (1:Qsz(3))*(h.parameters.blocksizes(3)-1)+h.parameters.blocksizes(3)/2);
+            [Quiver.Y Quiver.X Quiver.Z] = ndgrid((1:Qsz(1))*(incs(1)-1)+h.parameters.blocksizes(1)/2,...
+                (1:Qsz(2))*(incs(2)-1)+h.parameters.blocksizes(2)/2,...
+                (1:Qsz(3))*(incs(3)-1)+h.parameters.blocksizes(3)/2);
             else
-            [Quiver.Y Quiver.X Quiver.Z] = ndgrid((1:Qsz(1))*(h.parameters.blocksizes(1)-1)+h.parameters.blocksizes(1)/2,...
-                (1:Qsz(2))*(h.parameters.blocksizes(2)-1)+h.parameters.blocksizes(2)/2,1);
+            [Quiver.Y Quiver.X Quiver.Z] = ndgrid((1:Qsz(1))*(incs(1)-1)+h.parameters.blocksizes(1)/2,...
+                (1:Qsz(2))*(incs(2)-1)+h.parameters.blocksizes(2)/2,1);
             end
+            if nargin == 4
+                Quiver.X = Quiver.X + i1 -1;
+                Quiver.Y = Quiver.Y + j1 - 1;
+                Quiver.Z = Quiver.Z + k1 -1;
+            end
+
             Quiver.tm = toc;
         end
 
         function [B] = circshift_subpixel_MS(h,B,shift0)
-%             [YY, XX, ZZ] = ndgrid(1:size(B,1), 1:size(B,2),1:size(B,3));
-%             if Bool_GPU
-%                 XX = gpuArray(XX);
-%                 YY = gpuArray(YY);
-%                 ZZ = gpuArray(ZZ);
-%             end
+            if ~all(size(B,1:3) == size(h.utility.XX,1:3))
+                [h.utility.YY,h.utility.XX, h.utility.ZZ] = ndgrid(1:size(B,1), 1:size(B,2),1:size(B,3));
+                if h.parameters.use_GPU
+                    h.utility.XX = gpuArray(h.utility.XX);
+                    h.utility.YY = gpuArray(h.utility.YY);
+                    h.utility.ZZ = gpuArray(h.utility.ZZ);
+                end
+            end
+
             if all(mod(shift0,1) == 0) % integer shift
                 B = circshift(B, shift0);
             else % subpixel shift
@@ -314,11 +403,61 @@ classdef TFM_ANALYSIS < handle
                     end
            end
             R = [xc yc zc] - floor(size(Corr3D,[2 1 3])/2) - 1;
-            R = R .* h.parameters.resolution;
+            
         %     R
         %      figure(1),imagesc(max(Corr3D,[],3)), colorbar
         end
 
+        function Crop_mask = make_crop_mask(h, Im1, Im2)
+            keypressed = 0;
+            while keypressed ~= 1
+    
+                figure,
+                subplot(121), imagesc(max(Im1,[],3)), axis image, axis off, colormap(flip(cbrewer('seq','YlGnBu',256)))
+                subplot(122), imagesc(max(Im2,[],3)),  axis image, axis off, colormap(flip(cbrewer('seq','YlGnBu',256)))
+                mask = drawpolygon;
+                mask = createMask(mask);
+                if sum(mask(:)) == 0
+                    mask1 = ones(size(Im1,1),size(Im1,2),'single');
+                else
+                    mask1 = mask;
+                end
+                close
+                figure,
+                subplot(121), imagesc(squeeze(max(Im1,[],1))'), axis image, axis off, colormap(flip(cbrewer('seq','YlGnBu',256)))
+                subplot(122), imagesc(squeeze(max(Im2,[],1))'),  axis image, axis off, colormap(flip(cbrewer('seq','YlGnBu',256)))
+                mask = drawpolygon;
+                mask = createMask(mask);
+                if sum(mask(:)) == 0
+                    mask2 = ones(size(Im1,2),size(Im1,3),'single');
+                else
+                    mask2 = mask';
+                end
+                close
+                figure,
+                subplot(121), imagesc(squeeze(max(Im1,[],2))'), axis image, axis off, colormap(flip(cbrewer('seq','YlGnBu',256)))
+                subplot(122), imagesc(squeeze(max(Im2,[],2))'),  axis image, axis off, colormap(flip(cbrewer('seq','YlGnBu',256)))
+                mask = drawpolygon;
+                mask = createMask(mask);
+                if sum(mask(:)) == 0
+                    mask3 = ones(size(Im1,1),size(Im1,3),'single');
+                else
+                    mask3 = mask';
+                end
+                close
+    
+                Crop_mask = repmat(mask1, [1,1,size(Im1,3)]).* repmat(reshape(mask2, [1 size(Im1,2) size(Im1,3)]),[size(Im1,1),1,1])...
+                    .* repmat(reshape(mask3, [size(Im1,1) 1 size(Im1,3)]),[1,size(Im1,2),1]);
+                figure, orthosliceViewer(cat(2, Im2, Crop_mask.*Im2),'colormap', flip(cbrewer('seq','YlGnBu',256)))
+                clc,
+                keypressed = input('Press 1 to finish the loop; otherwise retry.');
+                close
+            end
+        
+%             orthosliceViewer(Crop_mask.*Im2,'colormap', flip(cbrewer('seq','YlGnBu',256)))
+
+
+        end
         
         function [H,XX,YY,ZZ] = mk_ellipse_MS(h,sizes, radii)
             if length(radii) == 1
